@@ -63,6 +63,26 @@ export type EventBundle = {
   signals: SignalsBundle;
 };
 
+export type AnalyzeArticleInput = {
+  article_id: string;
+  text: string;
+  outlet_id: string;
+  is_headline?: boolean;
+};
+
+export type AnalyzeArticleResult =
+  | {
+      success: true;
+      article_id: string;
+      job_id?: string;
+      queued?: boolean;
+      signals?: Record<string, unknown>;
+    }
+  | {
+      success: false;
+      error: string;
+    };
+
 export async function fetchSampleEventId(): Promise<string> {
   const { data, error } = await supabase
     .from("events")
@@ -73,6 +93,52 @@ export async function fetchSampleEventId(): Promise<string> {
   if (error) throw error;
   if (!data) throw new Error("No sample event seeded.");
   return data.id;
+}
+
+function getSupabaseEnv() {
+  const url = import.meta.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
+  const publishableKey =
+    import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_PUBLISHABLE_KEY;
+
+  if (!url || !publishableKey) {
+    throw new Error("Missing Supabase environment variables for analyzeArticle().");
+  }
+
+  return { url, publishableKey };
+}
+
+export async function analyzeArticle(input: AnalyzeArticleInput): Promise<AnalyzeArticleResult> {
+  const { url, publishableKey } = getSupabaseEnv();
+  const { data: sessionData } = await supabase.auth.getSession();
+  const accessToken = sessionData.session?.access_token;
+
+  const response = await fetch(`${url.replace(/\/$/, "")}/functions/v1/analyze-article`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      apikey: publishableKey,
+      Authorization: `Bearer ${accessToken ?? publishableKey}`,
+    },
+    body: JSON.stringify(input),
+  });
+
+  const payload = (await response.json().catch(() => ({}))) as AnalyzeArticleResult;
+
+  if (!response.ok) {
+    return {
+      success: false,
+      error:
+        (payload && "error" in payload && payload.error) ||
+        `Edge function request failed with ${response.status}`,
+    };
+  }
+
+  return payload.success
+    ? payload
+    : {
+        success: false,
+        error: "Unexpected edge function response.",
+      };
 }
 
 export async function fetchEventBundle(eventId: string): Promise<EventBundle> {
