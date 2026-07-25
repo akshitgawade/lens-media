@@ -199,3 +199,38 @@ export async function fetchEventBundle(eventId: string): Promise<EventBundle> {
     },
   };
 }
+
+const ANALYZE_SUPABASE_URL = "https://lnycmvscjimmdritmoul.supabase.co";
+const ANALYZE_ANON_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxueWNtdnNjamltbWRyaXRtb3VsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUwMDMzMzAsImV4cCI6MjEwMDU3OTMzMH0.FDxriw9LT9NOkXnvvOtvACMHV000owMCENBOqk8ydDo";
+
+export async function analyzeArticle(
+  articleId: string,
+  text: string,
+  outletId: string,
+  isHeadline: boolean = false,
+): Promise<void> {
+  const response = await fetch(`${ANALYZE_SUPABASE_URL}/functions/v1/analyze-article`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${ANALYZE_ANON_KEY}`,
+    },
+    body: JSON.stringify({
+      article_id: articleId,
+      text,
+      outlet_id: outletId,
+      is_headline: isHeadline,
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Analysis failed: ${error}`);
+  }
+
+  if (typeof window !== "undefined") {
+    window.location.reload();
+  }
+}
+

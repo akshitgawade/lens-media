@@ -24,7 +24,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { fetchEventBundle, type EventBundle } from "@/lib/narrative-data";
+import { analyzeArticle, fetchEventBundle, type EventBundle } from "@/lib/narrative-data";
 
 export const Route = createFileRoute("/_authenticated/dashboard/$eventId")({
   head: () => ({
@@ -85,8 +85,24 @@ function DashboardBody({ bundle }: { bundle: EventBundle }) {
     return { min, max };
   }, [articles, event]);
 
+  const [analyzingId, setAnalyzingId] = useState<string | null>(null);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+
+  const runAnalysis = async (articleId: string, text: string, outletId: string) => {
+    setAnalyzingId(articleId);
+    setAnalyzeError(null);
+    try {
+      await analyzeArticle(articleId, text, outletId);
+      window.location.reload();
+    } catch (e) {
+      setAnalyzeError(e instanceof Error ? e.message : "Analysis failed");
+      setAnalyzingId(null);
+    }
+  };
+
   return (
     <TooltipProvider delayDuration={150}>
+
     <div className="mx-auto max-w-7xl px-6 py-10">
       {/* Masthead */}
       <div className="border-b-4 border-double border-rule pb-8">
@@ -110,6 +126,28 @@ function DashboardBody({ bundle }: { bundle: EventBundle }) {
           </span>
         </div>
       </div>
+
+      {/* Re-analyze controls */}
+      <div className="mt-6 flex flex-wrap items-center gap-2">
+        <span className="eyebrow mr-1">Re-run analysis:</span>
+        {articles.map((article) => (
+          <button
+            key={article.id}
+            type="button"
+            disabled={analyzingId !== null}
+            onClick={() => runAnalysis(article.id, article.full_text, article.outlet_id)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-rule bg-card px-3 py-1.5 text-xs font-medium hover:bg-secondary disabled:opacity-60"
+          >
+            {analyzingId === article.id ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+            Re-analyze {outletById[article.outlet_id]?.name ?? "outlet"}
+          </button>
+        ))}
+      </div>
+      {analyzeError ? (
+        <p className="mt-2 text-xs text-destructive">{analyzeError}</p>
+      ) : null}
+
+
 
       {/* Two-column newspaper grid */}
       <div className="mt-10 grid gap-8 lg:grid-cols-12">
