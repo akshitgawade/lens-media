@@ -25,13 +25,11 @@ function AccountPage() {
       setEmail(data.user?.email ?? null);
       setCreatedAt(data.user?.created_at ?? null);
     });
-    supabase
-      .from("events")
-      .select("id")
-      .order("first_reported_at")
-      .limit(1)
-      .maybeSingle()
-      .then(({ data }) => setSampleId(data?.id ?? null));
+    import("@/lib/narrative-data").then(({ fetchSampleEventId }) => {
+      fetchSampleEventId()
+        .then((id) => setSampleId(id))
+        .catch(console.error);
+    });
   }, []);
 
   async function signOut() {

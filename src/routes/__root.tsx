@@ -132,9 +132,10 @@ function SiteHeader() {
   return (
     <header className="border-b border-rule bg-background/80 backdrop-blur">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
-        <Link to="/" className="flex items-baseline gap-2">
+        <Link to="/" className="flex items-center gap-2">
+          <img src="/logo.png" alt="Narrative Lens Logo" className="h-14 w-14 object-contain" />
           <span className="headline text-2xl">Narrative Lens</span>
-          <span className="eyebrow hidden sm:inline">A media-literacy tool</span>
+          <span className="eyebrow hidden translate-y-1 sm:inline text-[0.6rem]">A media-literacy tool</span>
         </Link>
         <nav className="flex items-center gap-6 text-sm">
           <Link to="/analyze" activeProps={{ className: "font-semibold" }} className="hover:text-accent transition-colors">

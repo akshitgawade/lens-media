@@ -51,7 +51,6 @@ function AnalyzePage() {
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-20">
-      <p className="eyebrow">Submit</p>
       <h1 className="headline mt-3 text-5xl">Analyze an event.</h1>
       <p className="mt-4 text-ink-muted">
         Enter a news topic, event, or a link to a specific article. We'll pull coverage from
@@ -65,7 +64,7 @@ function AnalyzePage() {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="e.g. Riverside housing evictions — or paste an article URL"
+            placeholder="Enter a topic - Or paste an article URL"
             className="w-full rounded-md border border-rule bg-card py-4 pl-11 pr-4 font-serif text-lg outline-none transition-colors focus:border-ink focus:ring-2 focus:ring-ring"
             disabled={loading}
           />
