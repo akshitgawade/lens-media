@@ -7,11 +7,14 @@ import {
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { supabase } from "@/integrations/supabase/client";
+import { SmoothScrollProvider } from "@/components/motion/SmoothScrollProvider";
+import { Atmosphere } from "@/components/Atmosphere";
+import { PaperGrain } from "@/components/PaperGrain";
 
 function NotFoundComponent() {
   return (
@@ -129,6 +132,12 @@ function RootShell({ children }: { children: ReactNode }) {
 }
 
 function SiteHeader() {
+  const [isAuthed, setIsAuthed] = useState(false);
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setIsAuthed(!!data.session));
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setIsAuthed(!!s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
   return (
     <header className="border-b border-rule bg-background/80 backdrop-blur">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
@@ -144,8 +153,8 @@ function SiteHeader() {
           <Link to="/methodology" activeProps={{ className: "font-semibold" }} className="hover:text-accent transition-colors">
             Methodology
           </Link>
-          <Link to="/auth" activeProps={{ className: "font-semibold" }} className="hover:text-accent transition-colors">
-            Sign in
+          <Link to={isAuthed ? "/account" : "/auth"} activeProps={{ className: "font-semibold" }} className="hover:text-accent transition-colors">
+            {isAuthed ? "Account" : "Sign in"}
           </Link>
         </nav>
       </div>
@@ -153,14 +162,27 @@ function SiteHeader() {
   );
 }
 
+
+
 function SiteFooter() {
+  const scrollTop = () => window.scrollTo({ top: 0, behavior: "smooth" });
   return (
     <footer className="mt-24 border-t border-rule">
-      <div className="mx-auto flex max-w-7xl flex-col gap-4 px-6 py-8 text-xs text-muted-foreground sm:flex-row sm:justify-between">
-        <p>© {new Date().getFullYear()} Narrative Lens. Observations, not verdicts.</p>
-        <div className="flex gap-4">
+      <div className="mx-auto flex max-w-7xl flex-col gap-4 px-6 py-8 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+        <p className="shrink-0">© {new Date().getFullYear()} Narrative Lens.</p>
+        <p className="flex-1 text-center italic sm:mx-8">
+          Observations, not verdicts. See <Link to="/methodology" className="underline hover:text-foreground">methodology</Link> for how each signal is measured.
+        </p>
+        <div className="flex items-center gap-4 shrink-0">
           <Link to="/methodology" className="hover:text-foreground">Methodology</Link>
           <Link to="/analyze" className="hover:text-foreground">Analyze</Link>
+          <button
+            type="button"
+            onClick={scrollTop}
+            className="inline-flex items-center gap-1 rounded-md border border-rule bg-card px-3 py-1.5 text-xs font-medium transition hover:bg-secondary hover:shadow-sm"
+          >
+            Page up ↑
+          </button>
         </div>
       </div>
     </footer>
@@ -169,6 +191,15 @@ function SiteFooter() {
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+  const router = useRouter();
+  const isDashboard = router.state.location.pathname.startsWith("/dashboard");
+  const [showSplash, setShowSplash] = useState(true);
+
+  useEffect(() => {
+    // Splash: rotate 360 (0.6s) + wait 0.5s + fade out (0.4s) = ~1.5s total
+    const t = setTimeout(() => setShowSplash(false), 1500);
+    return () => clearTimeout(t);
+  }, []);
 
   useEffect(() => {
     const { data: sub } = supabase.auth.onAuthStateChange((event) => {
@@ -181,13 +212,37 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <div className="flex min-h-screen flex-col">
-        <SiteHeader />
-        <main className="flex-1">
-          <Outlet />
-        </main>
-        <SiteFooter />
-      </div>
+      {/* Splash overlay */}
+      {showSplash ? (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-background"
+          style={{
+            animation: "splashFadeOut 0.4s ease-in 1.1s forwards",
+          }}
+        >
+          <img
+            src="/logo.png"
+            alt="Narrative Lens"
+            className="object-contain"
+            style={{
+              height: 200,
+              width: 200,
+              animation: "splashSpin 0.6s ease-in-out forwards, splashLogoFade 0.4s ease-in 1.1s forwards",
+            }}
+          />
+        </div>
+      ) : null}
+      <SmoothScrollProvider>
+        <Atmosphere variant={isDashboard ? "dashboard" : "public"} />
+        <PaperGrain variant={isDashboard ? "dashboard" : "public"} />
+        <div className="relative z-10 flex min-h-screen flex-col">
+          <SiteHeader />
+          <main className="flex-1">
+            <Outlet />
+          </main>
+          <SiteFooter />
+        </div>
+      </SmoothScrollProvider>
     </QueryClientProvider>
   );
 }

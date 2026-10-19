@@ -22,6 +22,7 @@ export type Article = {
   headline: string;
   published_at: string;
   full_text: string;
+  extraction_quality?: "full" | "partial" | "headline_only" | "failed" | "unknown" | string;
 };
 
 export type HeadlineSnapshot = {
@@ -43,15 +44,21 @@ export type Stakeholder = {
 
 export type Phrase = { text: string; type: "active" | "passive" | "agentless" };
 
+type SignalMeta = {
+  evidence_count?: number;
+  analysis_status?: string;
+  analysis_method?: string;
+};
+
 export type SignalsBundle = {
-  source_attribution: { article_id: string; official_ratio: number; independent_ratio: number }[];
-  agency_framing: { article_id: string; agency_score: number; example_phrases: Phrase[] }[];
-  language_intensity: {
+  source_attribution: ({ article_id: string; official_ratio: number | null; independent_ratio: number | null } & SignalMeta)[];
+  agency_framing: ({ article_id: string; agency_score: number | null; example_phrases: Phrase[] } & SignalMeta)[];
+  language_intensity: ({
     article_id: string;
-    emotional_score: number;
-    certainty_score: number;
-    urgency_score: number;
-  }[];
+    emotional_score: number | null;
+    certainty_score: number | null;
+    urgency_score: number | null;
+  } & SignalMeta)[];
   coverage_matrix: { article_id: string; stakeholder_id: string; present: boolean }[];
 };
 
@@ -64,15 +71,36 @@ export type EventBundle = {
   signals: SignalsBundle;
 };
 
+function nullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizePhrases(value: unknown): Phrase[] {
+  let parsed = value;
+  if (typeof parsed === "string") {
+    try { parsed = JSON.parse(parsed); } catch { parsed = []; }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.flatMap((phrase) => {
+    if (typeof phrase === "string") return [{ text: phrase, type: "active" as const }];
+    if (!phrase || typeof phrase !== "object") return [];
+    const text = "text" in phrase && typeof phrase.text === "string" ? phrase.text : "";
+    const type = "type" in phrase && (phrase.type === "active" || phrase.type === "passive" || phrase.type === "agentless") ? phrase.type : "active";
+    return text ? [{ text, type } as Phrase] : [];
+  });
+}
+
 export async function fetchSampleEventId(): Promise<string> {
   const { data, error } = await supabase
     .from("events")
     .select("id")
-    .eq("title", "Supreme Court SIR Electoral Rolls Verdict")
+    .order("first_reported_at", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (error) throw error;
-  if (!data) throw new Error("No sample event seeded.");
+  if (!data) throw new Error("No events found. Search for a topic on the Analyze page first.");
   return data.id;
 }
 
@@ -140,21 +168,96 @@ export async function fetchEventBundle(eventId: string): Promise<EventBundle> {
     snapshots: (snapsRes.data ?? []) as HeadlineSnapshot[],
     stakeholders: (stakeholdersRes.data ?? []) as Stakeholder[],
     signals: {
-      source_attribution: (ssaRes.data ?? []) as SignalsBundle["source_attribution"],
-      agency_framing: (safRes.data ?? []).map((r: { article_id: string; agency_score: number; example_phrases: unknown }) => ({
+      source_attribution: (ssaRes.data ?? []).map((r) => ({
         article_id: r.article_id,
-        agency_score: Number(r.agency_score),
-        example_phrases: (r.example_phrases as Phrase[]) ?? [],
+        official_ratio: nullableNumber(r.official_ratio),
+        independent_ratio: nullableNumber(r.independent_ratio),
+        evidence_count: r.evidence_count,
+        analysis_status: r.analysis_status,
+        analysis_method: r.analysis_method,
       })),
-      language_intensity: (sliRes.data ?? []) as SignalsBundle["language_intensity"],
+      agency_framing: (safRes.data ?? []).map((r) => ({
+        article_id: r.article_id,
+        agency_score: nullableNumber(r.agency_score),
+        example_phrases: normalizePhrases(r.example_phrases),
+        evidence_count: r.evidence_count,
+        analysis_status: r.analysis_status,
+        analysis_method: r.analysis_method,
+      })),
+      language_intensity: (sliRes.data ?? []).map((r) => ({
+        article_id: r.article_id,
+        emotional_score: nullableNumber(r.emotional_score),
+        certainty_score: nullableNumber(r.certainty_score),
+        urgency_score: nullableNumber(r.urgency_score),
+        evidence_count: r.evidence_count,
+        analysis_status: r.analysis_status,
+        analysis_method: r.analysis_method,
+      })),
       coverage_matrix: (covRes.data ?? []) as SignalsBundle["coverage_matrix"],
     },
   };
 }
 
-const ANALYZE_SUPABASE_URL = "https://lnycmvscjimmdritmoul.supabase.co";
-const ANALYZE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxueWNtdnNjamltbWRyaXRtb3VsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUwMDMzMzAsImV4cCI6MjEwMDU3OTMzMH0.FDxriw9LT9NOkXnvvOtvACMHV000owMCENBOqk8ydDo";
+// ---- Saved Analyses ----
+
+export async function saveAnalysis(eventId: string): Promise<void> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("You must be signed in to save an analysis.");
+
+  const { error } = await supabase
+    .from("saved_analyses")
+    .upsert({ user_id: user.id, event_id: eventId }, { onConflict: "user_id,event_id" });
+  if (error) throw error;
+}
+
+export async function unsaveAnalysis(eventId: string): Promise<void> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("You must be signed in.");
+
+  const { error } = await supabase
+    .from("saved_analyses")
+    .delete()
+    .eq("user_id", user.id)
+    .eq("event_id", eventId);
+  if (error) throw error;
+}
+
+export async function isEventSaved(eventId: string): Promise<boolean> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return false;
+
+  const { data } = await supabase
+    .from("saved_analyses")
+    .select("event_id")
+    .eq("user_id", user.id)
+    .eq("event_id", eventId)
+    .maybeSingle();
+  return !!data;
+}
+
+export type SavedAnalysisRow = {
+  id: string;
+  user_id: string;
+  event_id: string;
+  created_at: string;
+};
+
+export async function fetchSavedAnalyses(): Promise<SavedAnalysisRow[]> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return [];
+
+  const { data, error } = await supabase
+    .from("saved_analyses")
+    .select("*")
+    .eq("user_id", user.id)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return data ?? [];
+}
+
+const ANALYZE_SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "https://lnycmvscjimmdritmoul.supabase.co";
+const ANALYZE_ANON_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxueWNtdnNjamltbWRyaXRtb3VsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUwMDMzMzAsImV4cCI6MjEwMDU3OTMzMH0.FDxriw9LT9NOkXnvvOtvACMHV000owMCENBOqk8ydDo";
+const LOCAL_BACKEND_URL = import.meta.env.VITE_LOCAL_BACKEND_URL || "http://127.0.0.1:8000";
 
 export async function analyzeArticle(
   articleId: string,
@@ -162,11 +265,37 @@ export async function analyzeArticle(
   outletId: string,
   isHeadline: boolean = false,
 ): Promise<void> {
+  // During local development call the local FastAPI process directly. A
+  // hosted Edge Function cannot reach a developer machine's localhost.
+  if (import.meta.env.DEV) {
+    const response = await fetch(`${LOCAL_BACKEND_URL.replace(/\/$/, "")}/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        article_id: articleId,
+        text,
+        outlet_id: outletId,
+        is_headline: isHeadline,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Local analysis failed: ${error || response.statusText}`);
+    }
+    return;
+  }
+
+  // Use Supabase Edge Function — never expose service-role key, use anon key + user JWT
+  const { data: sessData } = await supabase.auth.getSession();
+  const token = sessData.session?.access_token ?? ANALYZE_ANON_KEY;
+
   const response = await fetch(`${ANALYZE_SUPABASE_URL}/functions/v1/analyze-article`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${ANALYZE_ANON_KEY}`,
+      apikey: ANALYZE_ANON_KEY,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify({
       article_id: articleId,
@@ -176,13 +305,12 @@ export async function analyzeArticle(
     }),
   });
 
+  // Edge Function returns 202 when backend times out but queues the job — treat as success
+  if (response.status === 202) return;
+
   if (!response.ok) {
     const error = await response.text();
     throw new Error(`Analysis failed: ${error}`);
-  }
-
-  if (typeof window !== "undefined") {
-    window.location.reload();
   }
 }
 

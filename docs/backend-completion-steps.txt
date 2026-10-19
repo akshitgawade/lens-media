@@ -1,0 +1,314 @@
+================================================================================
+NARRATIVE LENS — BACKEND COMPLETION STEPS
+================================================================================
+Scope: Build + wire the read-only backend that serves the dashboard's
+EventBundle. The dashboard itself keeps using the direct Supabase call
+(fetchEventBundle) until a human explicitly approves rewiring — see the safety
+note at the bottom.
+
+Current backend state (verified in backend/main.py):
+  - /health            GET   (works)
+  - /analyze           POST  (writes signals via service key — KEEP AS IS)
+  - get_supabase_client()  helper exists, returns supabase Client
+  - NO Pydantic models file yet
+  - NO GET /events/{id}/bundle endpoint yet  <-- the main missing piece
+
+Frontend contract (src/lib/narrative-data.ts, EventBundle type, lines 3-65):
+  event:       { id, title, summary, first_reported_at }
+  outlets:     { id, name, url, authority_tier }[]
+  articles:    { id, event_id, outlet_id, url, headline, published_at, full_text }[]
+  snapshots:   { id, article_id, headline_text, captured_at, source: "wayback"|"live" }[]
+  stakeholders:{ id, event_id, name, role, first_appeared_at: string|null }[]
+  signals:
+    source_attribution:   { article_id, official_ratio:number, independent_ratio:number }[]
+    agency_framing:       { article_id, agency_score:number, example_phrases: Phrase[] }[]
+                            Phrase = { text:string, type:"active"|"passive"|"agentless" }
+    language_intensity:   { article_id, emotional_score, certainty_score, urgency_score }[]  (numbers)
+    coverage_matrix:      { article_id, stakeholder_id, present:boolean }[]
+
+DB schema (supabase/migrations/*.sql) — exact table/column names:
+  outlets(id, name, url, authority_tier, created_at)
+  events(id, title, summary, first_reported_at, created_at)
+  articles(id, event_id, outlet_id, url, headline, published_at, full_text)
+  headline_snapshots(id, article_id, headline_text, captured_at, source)   -- source is ENUM('wayback','live')
+  stakeholders(id, event_id, name, role, first_appeared_at)                -- timestamptz, NULLABLE
+  signals_source_attribution(article_id PK, official_ratio numeric, independent_ratio numeric)
+  signals_agency_framing(article_id PK, agency_score numeric, example_phrases jsonb)
+  signals_language_intensity(article_id PK, emotional_score numeric, certainty_score numeric, urgency_score numeric)
+  coverage_matrix(article_id, stakeholder_id, present boolean)             -- PK(article_id, stakeholder_id)
+  All tables have a "public read" RLS policy, so anon SELECT works.
+
+================================================================================
+PREREQUISITES
+================================================================================
+1. Backend venv + deps
+     cd backend
+     python -m venv venv
+     .\venv\Scripts\Activate.ps1        (PowerShell)  /  source venv/bin/activate (bash)
+     pip install -r requirements.txt
+   (requirements.txt already lists fastapi, uvicorn, supabase, pydantic, python-dotenv, etc.)
+
+2. Env vars — copy backend/.env.example -> backend/.env and fill:
+     SUPABASE_URL=https://<project>.supabase.co
+     SUPABASE_SERVICE_KEY=<service_role key>     (read+write; kept server-side only)
+     PORT=8000                                   (optional; default 8000)
+   NOTE: the frontend uses the anon key (src/integrations/supabase/client.ts).
+   The backend uses the service key. Never expose SUPABASE_SERVICE_KEY to the browser.
+
+3. Confirm the SIR demo event exists in Supabase. The dashboard demo event id is
+   ca9c6cc1-c954-48cd-9739-1630a4b5eb32 (AGENTS.md). If only the seeded
+   "Riverside Housing Block Evictions" event is present, that is fine for a
+   backend smoke test — just use its real id from the events table.
+
+================================================================================
+STEP 1 — Add Pydantic models
+================================================================================
+File: backend/models.py  (NEW)
+Mirror the frontend EventBundle shape EXACTLY. Key gotchas:
+  - agency_score must be float (not str)
+  - example_phrases must be a list of {text:str, type:str}
+  - first_appeared_at is Optional[str] (nullable)
+  - source is a Literal["wayback","live"] or str
+
+  --- models.py (skeleton) ---
+  from __future__ import annotations
+  from typing import Literal, Optional
+  from pydantic import BaseModel
+
+  class OutletOut(BaseModel):
+      id: str
+      name: str
+      url: str
+      authority_tier: str
+
+  class EventOut(BaseModel):
+      id: str
+      title: str
+      summary: str
+      first_reported_at: str
+
+  class ArticleOut(BaseModel):
+      id: str
+      event_id: str
+      outlet_id: str
+      url: str
+      headline: str
+      published_at: str
+      full_text: str
+
+  class HeadlineSnapshotOut(BaseModel):
+      id: str
+      article_id: str
+      headline_text: str
+      captured_at: str
+      source: Literal["wayback", "live"]
+
+  class StakeholderOut(BaseModel):
+      id: str
+      event_id: str
+      name: str
+      role: str
+      first_appeared_at: Optional[str] = None
+
+  class SourceAttributionOut(BaseModel):
+      article_id: str
+      official_ratio: float
+      independent_ratio: float
+
+  class PhraseOut(BaseModel):
+      text: str
+      type: str
+
+  class AgencyFramingOut(BaseModel):
+      article_id: str
+      agency_score: float
+      example_phrases: list[PhraseOut] = []
+
+  class LanguageIntensityOut(BaseModel):
+      article_id: str
+      emotional_score: float
+      certainty_score: float
+      urgency_score: float
+
+  class CoverageMatrixOut(BaseModel):
+      article_id: str
+      stakeholder_id: str
+      present: bool
+
+  class SignalsBundleOut(BaseModel):
+      source_attribution: list[SourceAttributionOut] = []
+      agency_framing: list[AgencyFramingOut] = []
+      language_intensity: list[LanguageIntensityOut] = []
+      coverage_matrix: list[CoverageMatrixOut] = []
+
+  class EventBundleOut(BaseModel):
+      event: EventOut
+      outlets: list[OutletOut] = []
+      articles: list[ArticleOut] = []
+      snapshots: list[HeadlineSnapshotOut] = []
+      stakeholders: list[StakeholderOut] = []
+      signals: SignalsBundleOut
+
+  Verify:  python -c "from models import EventBundleOut; print('ok')"
+
+================================================================================
+STEP 2 — Add GET /events/{event_id}/bundle
+================================================================================
+File: backend/main.py  (EDIT — add a new endpoint; do NOT touch /analyze or /health)
+
+Approach: reuse get_supabase_client(). Query each table with .select("*"),
+assemble into EventBundleOut. Sort to match frontend:
+  articles   -> order("published_at")
+  snapshots  -> order("captured_at")
+  stakeholders -> order("first_appeared_at")   (nullable sorts last; fine)
+  example_phrases: supabase returns jsonb as a Python list/dict already — pass
+    through after coercing each item to PhraseOut(text=..., type=...).
+
+  --- paste into main.py (after /health) ---
+  from models import EventBundleOut, SignalsBundleOut
+
+  @app.get("/events/{event_id}/bundle", response_model=EventBundleOut)
+  def get_event_bundle(event_id: str) -> EventBundleOut:
+      client = get_supabase_client()
+
+      ev = client.table("events").select("*").eq("id", event_id).maybe_single().execute()
+      if not ev.data:
+          from fastapi import HTTPException
+          raise HTTPException(status_code=404, detail="Event not found")
+
+      articles = client.table("articles").select("*").eq("event_id", event_id).order("published_at").execute()
+      article_ids = [a["id"] for a in (articles.data or [])]
+      outlet_ids = [a["outlet_id"] for a in (articles.data or [])]
+
+      outlets = client.table("outlets").select("*").in_("id", outlet_ids).execute() if outlet_ids else type("R",(),{"data":[]})()
+      snapshots = client.table("headline_snapshots").select("*").in_("article_id", article_ids).order("captured_at").execute() if article_ids else type("R",(),{"data":[]})()
+      stakeholders = client.table("stakeholders").select("*").eq("event_id", event_id).order("first_appeared_at").execute()
+
+      ssa = client.table("signals_source_attribution").select("*").in_("article_id", article_ids).execute() if article_ids else type("R",(),{"data":[]})()
+      saf = client.table("signals_agency_framing").select("*").in_("article_id", article_ids).execute() if article_ids else type("R",(),{"data":[]})()
+      sli = client.table("signals_language_intensity").select("*").in_("article_id", article_ids).execute() if article_ids else type("R",(),{"data":[]})()
+      cov = client.table("coverage_matrix").select("*").in_("article_id", article_ids).execute() if article_ids else type("R",(),{"data":[]})()
+
+      agency_framing = []
+      for row in (saf.data or []):
+          phrases = row.get("example_phrases") or []
+          agency_framing.append({
+              "article_id": row["article_id"],
+              "agency_score": float(row["agency_score"]),
+              "example_phrases": [{"text": p["text"], "type": p["type"]} for p in phrases],
+          })
+
+      signals = {
+          "source_attribution": ssa.data or [],
+          "agency_framing": agency_framing,
+          "language_intensity": sli.data or [],
+          "coverage_matrix": cov.data or [],
+      }
+
+      return EventBundleOut(
+          event=ev.data,
+          outlets=outlets.data or [],
+          articles=articles.data or [],
+          snapshots=snapshots.data or [],
+          stakeholders=stakeholders.data or [],
+          signals=signals,
+      )
+
+  (The `type("R",(),{"data":[]})()` trick is just an empty-result stub so the
+   `.data` accesses below don't crash when article_ids is empty. Cleaner: use
+   `client.table(...).select("*"); res = res.execute()` only inside `if article_ids`,
+   else set the var to {"data": []}.)
+
+Verify locally:
+  uvicorn main:app --reload
+  # in another shell:
+  curl http://localhost:8000/health
+  curl http://localhost:8000/events/<REAL_EVENT_ID>/bundle | python -m json.tool
+  # confirm: agency_score is a number, example_phrases is a list of {text,type},
+  # empty event returns empty arrays (not 500).
+
+================================================================================
+STEP 3 — Frontend: add fetchEventBundleFromApi() (parallel, unused by default)
+================================================================================
+File: src/lib/narrative-data.ts  (ADD a new export; do NOT change fetchEventBundle)
+
+  export async function fetchEventBundleFromApi(eventId: string): Promise<EventBundle> {
+    const res = await fetch(`/api/events/${eventId}/bundle`);
+    if (!res.ok) throw new Error(`Backend API error: ${res.status}`);
+    return res.json();
+  }
+
+  NOTE: URLs depend on the Vite proxy (Step 4). If you instead call the backend
+  directly, use `http://localhost:8000/events/${eventId}/bundle`.
+
+================================================================================
+STEP 4 — Vite dev proxy (so /api -> backend)
+================================================================================
+File: vite.config.ts  (EDIT — add server.proxy INSIDE the vite: { } block)
+  IMPORTANT: the file says the @lovable.dev preset already adds plugins; do NOT
+  duplicate plugins. Only add the proxy field. Current structure:
+    export default defineConfig({
+      tanstackStart: { server: { entry: "server" } },
+      vite: { plugins: [nitro()], server: { proxy: { "/api": { target: "http://localhost:8000", changeOrigin: true, rewrite: (p) => p.replace(/^\/api/, "") } } } },
+    });
+
+Verify: with `bun run dev` AND `uvicorn main:app --reload` running, open the
+browser DevTools console and run:
+  await (await fetch("/api/events/<REAL_EVENT_ID>/bundle")).json()
+  -> should return the bundle JSON.
+
+================================================================================
+STEP 5 — Supabase Edge Function proxy (optional, production only)
+================================================================================
+File: supabase/functions/analyze-article/index.ts
+  The Edge Function can optionally forward analyze traffic to the FastAPI
+  backend. It already exists; you only need to set a BACKEND_URL secret in the
+  Supabase dashboard:
+    supabase secrets set BACKEND_URL=https://<your-backend-host>
+  (This step is separate from the read endpoint and is NOT required for the
+   dashboard to render via the API. Leave it until the read path is verified.)
+
+================================================================================
+STEP 6 — Wire the dashboard (MANUAL, HUMAN-APPROVED ONLY)
+================================================================================
+AGENTS.md hard rule: the live demo dashboard (dashboard.$eventId.tsx) MUST keep
+using fetchEventBundle() until a human explicitly says "wire it". When approved:
+  - In dashboard.$eventId.tsx, replace the fetchEventBundle(eventId) call site
+    with fetchEventBundleFromApi(eventId).
+  - Add a try/catch fallback: on any API error, call fetchEventBundle(eventId)
+    so the demo never breaks.
+  - Keep fetchEventBundle() in narrative-data.ts (it is the safety net).
+
+  Example pattern:
+    let bundle: EventBundle;
+    try { bundle = await fetchEventBundleFromApi(eventId); }
+    catch { bundle = await fetchEventBundle(eventId); }
+
+================================================================================
+VERIFICATION CHECKLIST
+================================================================================
+[ ] backend venv created, requirements installed
+[ ] models.py imports cleanly
+[ ] GET /events/{id}/bundle returns JSON matching EventBundle field-for-field
+[ ] agency_score is a NUMBER (not string)
+[ ] example_phrases is [{text, type}] (not a raw JSON string)
+[ ] empty event (no articles) -> empty arrays, not a 500
+[ ] 404 for a non-existent event_id
+[ ] fetchEventBundleFromApi() returns identical data to fetchEventBundle() for the same event
+[ ] Vite /api proxy works in the browser
+[ ] bun run build passes   (run `bun run build`; EXIT 0)
+[ ] bun run lint is NOT required to pass — repo has ~6900 pre-existing
+    prettier/CRLF errors that are out of scope; do not "fix" them
+
+================================================================================
+WHAT NOT TO DO (safety)
+================================================================================
+- Do NOT remove or rename fetchEventBundle() in narrative-data.ts.
+- Do NOT auto-rewire the dashboard to the API in any automated step.
+- Do NOT add auth to the FastAPI GET endpoint for this scope (public data).
+- Do NOT implement real RSS ingestion in /analyze (out of scope).
+- Do NOT commit SUPABASE_SERVICE_KEY; it stays in backend/.env (gitignored).
+- Do NOT force-push / rebase / amend already-pushed commits (Lovable two-way sync).
+- Do NOT create new files under src/routes/ (file-based routing collisions).
+- Only run ONE `bun run dev` at a time.
+================================================================================

@@ -1,0 +1,368 @@
+================================================================================
+NARRATIVE LENS — ALL ALGORITHMS: CODE + EXPLANATION
+================================================================================
+This document explains every algorithm used in the Narrative Lens backend and
+frontend, with the actual code and how it works.
+
+
+================================================================================
+1. ENTITY EXTRACTION & SOURCE ATTRIBUTION
+================================================================================
+File: backend/nlp_pipeline.py — extract_entities() + _tier_for_entity()
+
+PURPOSE: Given a news article body, extract named entities (people, orgs,
+locations) and classify each as "official" or "independent" source. The ratio
+of official-to-independent sources is the "source attribution" signal.
+
+HOW IT WORKS:
+  a) spaCy NER pipeline extracts entities labelled PERSON, ORG, or GPE.
+  b) Each entity is deduplicated by (name, tier).
+  c) For each entity, we look at the sentence it appears in ("context") and
+     check for keyword matches against two hardcoded lists.
+
+  OFFICIAL_KEYWORDS:
+    police, officer, government, official, minister, authority, court, judge,
+    spokesperson, department, administration, bureau, agency, commission,
+    ministry, mayor, council, prosecutor, regulator, investigator, security
+
+  INDEPENDENT_KEYWORDS:
+    victim, witness, resident, neighbor, activist, advocate, expert, ngo,
+    eyewitness, survivor, family, community, protester, demonstrator, tenant,
+    parent, student, worker, union, lawyer, researcher, professor, doctor,
+    civil society, human rights
+
+HOW ATTRIBUTED VOICES ARE COUNTED (analyze_source_attribution):
+  1. For each sentence, find attribution cues: said, stated, told, reported,
+     confirmed, warned, argued, claimed, announced, described, explained,
+     testified, declared, insisted, denied, or "according to".
+  2. For each cue, look for sources using three strategies:
+     a) Named entity near the cue (PERSON/ORG/GPE within 90 chars).
+     b) Role-phrase near the cue (e.g., "police said", "residents claimed",
+        "according to officials") using a regex that matches OFFICIAL and
+        INDEPENDENT keywords.
+     c) Tail attribution: "..." said the minister.
+  3. Each candidate is classified as official or independent using
+     _classify_source_phrase (checks OFFICIAL/INDEPENDENT keywords in the
+     candidate text). Unmatched candidates are skipped.
+  4. Counts are normalized to ratios summing to 1.0 when evidence exists.
+     If only official voices: official_ratio=1.0, independent_ratio=0.0.
+     If only independent voices: official_ratio=0.0, independent_ratio=1.0.
+     If no attributable sources found: both ratios are null, evidence_count=0.
+
+ATTRIBUTION VERBS (for source identification, not classification):
+  said, stated, told, reported, confirmed, warned, argued, claimed,
+  announced, described, explained, testified, declared, insisted, denied,
+  according to
+
+LIMITATIONS:
+  - Keyword-based classification: "Ministry of Health" matches "ministry" →
+    official; "Health activist" matches "activist" → independent.
+  - spaCy en_core_web_sm is a small model — may miss entities in complex text.
+  - Only entities within 90 chars of an attribution verb are counted.
+
+
+================================================================================
+2. AGENCY FRAMING DETECTION
+================================================================================
+File: backend/nlp_pipeline.py — detect_agency_framing() + _classify_agency_phrase()
+
+PURPOSE: Determine whether text attributes actions to an agent (active voice),
+hides the agent (agentless), or uses passive voice. This measures how much
+responsibility an outlet assigns to actors.
+
+HOW IT WORKS:
+  Two paths depending on whether input is headline or full text:
+
+  HEADLINES (regex-based, no spaCy parse needed):
+    - If past-tense verb + "by" → passive
+    - If past-tense verb without "by" and no subject → agentless
+    - Otherwise → active
+
+  FULL TEXT (spaCy dependency parse):
+    - Check for nsubjpass/auxpass dependencies → passive
+    - Check for VBN (past participle) without any subject → agentless
+    - Otherwise → active
+
+  The agency_score is the weighted average of sentence-level scores:
+    active = high (~0.86-0.92, higher with speech verbs or named subjects)
+    passive with by-agent = 0.34
+    passive without by-agent = 0.16
+    agentless = 0.12
+
+  Speech verbs with a clear subject do not reduce agency.
+  Hedging reduces agency slightly (up to -0.18).
+
+SCORING DETAILS:
+  - Sentences are weighted by length (4-30 words) so short fragments don't
+    dominate and long paragraphs are capped.
+  - Up to 3 example phrases are selected, one per observed framing type
+    (active/passive/agentless), then remaining slots filled by most
+    informative sentences.
+  - All returned examples are exact substrings of the source text.
+  - Phrase types: active, passive, agentless only (no "mixed").
+
+NO-EVIDENCE STATE:
+  When no sentences with ≥3 words exist (or text is empty):
+    agency_score = null, example_phrases = [], evidence_count = 0,
+    analysis_status = "no_evidence"
+
+
+================================================================================
+3. LANGUAGE INTENSITY SCORING
+================================================================================
+File: backend/nlp_pipeline.py — score_language_intensity() + _score_intensity_dimension()
+
+PURPOSE: Measure how emotionally charged, certain, or urgent a text is by
+counting matches against predefined word lists (lexicons).
+
+HOW IT WORKS:
+  a) Tokenize text into normalized word forms.
+  b) Count matches against three lexicons (with multi-word phrase matching).
+  c) Score using a calibrated density curve that rewards intensity relative
+     to text length.
+  d) Headlines receive a modest 1.0× boost (not dominant).
+
+LEXICONS:
+
+  EMOTIONAL: shocking, tragic, devastating, outrage, horrific, alarming,
+    critical, heartbreaking, terrifying, appalling, disturbing, traumatic,
+    painful, slammed, blasted, fury, anger, condemned, furious, scathing,
+    fire, war, battle, clash, panic, chaos, suffering, grief, fear, cruel,
+    brutal, brutality, disaster, disastrous, crisis-hit, (and more)
+
+  CERTAINTY: confirmed, definitely, proven, certain, always, never, must,
+    will, certainly, absolutely, undoubtedly, clearly, obviously, asserted,
+    insisted, declared, maintained, emphasized, stressed, reiterated,
+    affirmed, vowed, pledged
+
+  URGENCY: breaking, urgent, immediate, crisis, emergency, deadline,
+    rapidly, swiftly, quickly, escalating, soaring, surging, plummeting,
+    crackdown, warned, warning, immediately, overnight, escalation,
+    surge, surged, rushed, (and more)
+
+  HEDGING (reduces certainty): allegedly, reportedly, possibly, may,
+    might, could, apparently, seemingly, likely, unlikely, appears,
+    suggested, (and more)
+
+CALIBRATION:
+  denominator = 1.0 + (0.03 × body_words)
+  score = weighted_hits / denominator
+
+  Test cases:
+    - 200-word text with 2 emotional words: score ≈ 0.25
+    - 500-word text with 5 emotional words: score ≈ 0.31
+    - 500-word text with 10 emotional words: score ≈ 0.51
+    - 500-word text with 3 certainty words and 1 hedge: score ≈ 0.22
+
+  Hedging terms do NOT increase certainty. When subtract_hedges=True
+  (certainty dimension), hedge hits are subtracted from the weighted score.
+
+HEADLINE BOOST:
+  Headline words receive a 1.0× multiplier (same weight as body words).
+  This means a strongly-worded headline moves the needle without
+  dominating the signal.
+
+NO-EVIDENCE STATE:
+  When no analyzable text exists (empty or whitespace-only):
+    all three scores = null, evidence_count = 0, analysis_status = "no_evidence"
+  When text exists but no lexicon words match:
+    score = 0.0 (measured zero, NOT unavailable null)
+
+
+================================================================================
+4. WORD-LEVEL DIFF (FRAMESHIFT REPLAY)
+================================================================================
+File: src/routes/_authenticated/dashboard.$eventId.tsx — wordDiff()
+
+PURPOSE: Show exactly which words changed between two headline snapshots.
+Green = added, red strikethrough = removed, yellow = reworded (swap).
+
+ALGORITHM: Longest Common Subsequence (LCS) in suffix form.
+
+STEP-BY-STEP:
+  1. Split both strings into word+whitespace tokens.
+  2. Build LCS table (DP, suffix form): O(n*m) time, O(n*m) space.
+  3. Walk the table to produce raw diff parts.
+  4. Coalesce adjacent removed+added runs into "reworded" parts.
+
+
+================================================================================
+5. EVENT GENERATION (LLM-BASED)
+================================================================================
+File: backend/nlp_pipeline.py — generate_event_coverage()
+
+PURPOSE: Given a user's search query, generate a complete simulated news
+event with articles from 4 outlets, headline snapshots, stakeholders, and
+a coverage matrix.
+
+HOW IT WORKS:
+  1. Send a detailed prompt to Groq (openai/gpt-oss-120b) with JSON output mode.
+  2. The prompt specifies the exact JSON schema and rules.
+  3. Parse the JSON response and return it.
+  4. If Groq fails, return None (spaCy fallback in main.py).
+
+
+================================================================================
+6. NLP SIGNAL ANALYSIS (LLM-BASED)
+================================================================================
+File: backend/nlp_pipeline.py — analyze_text_with_llm() + analyze_outlet_batch()
+
+PURPOSE: For each article, extract the three quantitative signals using the
+LLM, then validate and blend with deterministic analysis.
+
+LLM BATCH ANALYSIS (analyze_outlet_batch):
+  - Groups articles by outlet for a single LLM call per outlet.
+  - Requires stable article_id values in both request and response.
+  - Rejects reordered, missing, duplicated, or malformed article results.
+  - Validates: article count matches, required fields present, relevance
+    is a valid float 0.0-1.0, all three signal dicts are present.
+  - Returns None on failure (caller falls back to deterministic analysis).
+
+LLM SIGNAL VALIDATION (_normalise_llm_signals):
+  - Official/independent ratios: must be valid floats 0.0-1.0 or null.
+    Evidence count is preserved from LLM output.
+  - Agency framing: agency_score validated as float or null.
+    Example phrases validated: each must be an exact substring of the
+    source text and have type active/passive/agentless only.
+  - Language intensity: each dimension validated as float 0.0-1.0 or null.
+    Evidence count is the number of non-null dimension scores.
+
+FALLBACK CHAIN:
+  LLM API → deterministic analysis (spaCy + lexicons)
+  If LLM fails, deterministic analysis still writes signals for every article.
+
+
+================================================================================
+7. LLM + DETERMINISTIC BLENDING
+================================================================================
+File: backend/main.py — _build_signal_data()
+
+PURPOSE: Compute deterministic evidence first, then cautiously blend LLM
+nuance. Never allow an LLM response to erase valid deterministic evidence.
+
+BLENDING RULES:
+  - Source attribution: LLM ratios are only blended when the LLM found
+    evidence (evidence_count > 0). This prevents confident-looking guesses
+    from filling empty graphs.
+  - Agency framing: blended with 35% LLM weight. Deterministic examples
+    are always preserved; LLM examples are appended (up to 3 total).
+  - Language intensity: each dimension blended independently with 35% LLM
+    weight. Evidence count is the number of non-null dimension scores.
+
+  blend(a, b, b_weight=0.35):
+    if a is None: return b
+    if b is None: return a
+    return a * (1 - b_weight) + b * b_weight
+
+
+================================================================================
+8. COVERAGE MATRIX
+================================================================================
+File: backend/main.py — inside generate_event and search endpoints
+
+PURPOSE: Map which stakeholders appear in which outlets' coverage.
+
+STRUCTURE:
+  matrix[article_id][stakeholder_id] = present: boolean
+
+  Coverage rows are per-article (not per-outlet), so an event with two
+  articles receives separate coverage rows for each.
+
+  Stakeholder mentions are checked using:
+  1. Exact substring match (case-insensitive)
+  2. Abbreviation match (e.g., "NDRRMA" in parentheses)
+  3. Word overlap (≥ half of multi-word names must match)
+
+
+================================================================================
+9. NLP PIPELINE FALLBACK CHAIN
+================================================================================
+File: backend/main.py — /analyze, /events/generate, /events/search
+
+When the LLM (Groq) is unavailable or fails:
+
+  1. Source Attribution:
+     spaCy NER + attribution-verb detection → ratio
+
+  2. Agency Framing:
+     spaCy dependency parse → passive/active/agentless → weighted score
+
+  3. Language Intensity:
+     Lexicon matching → calibrated density score
+
+When the LLM (Groq) is available:
+
+  1. Send text to Groq with structured JSON prompt
+  2. Validate and normalize response
+  3. Blend with deterministic analysis (35% LLM weight)
+  4. Write to Supabase
+
+The fallback ensures the app works even without an API key, though with
+less nuanced analysis. Deterministic analysis ALWAYS writes signals
+for every article, even when LLM is unavailable.
+
+
+================================================================================
+10. SIGNAL DISPLAY ON DASHBOARD
+================================================================================
+File: src/routes/_authenticated/dashboard.$eventId.tsx
+
+SOURCE ATTRIBUTION:
+  Stacked bar chart (Recharts BarChart, horizontal layout)
+  - Official voices (blue)
+  - Independent voices (violet)
+  - Per-outlet breakdown (averaged if multiple articles)
+  - No-evidence outlets show: "No attributable voices were found..."
+
+AGENCY FRAMING:
+  - Bar per outlet with agency score
+  - Score display: 0-1 raw → 15-100 display scale
+  - Traffic-light dot: red (<0.33), amber (0.33-0.66), green (>0.66)
+  - Up to 3 example phrases with type labels (active/passive/agentless)
+  - No-evidence outlets show: "There are not enough analyzable sentences..."
+
+LANGUAGE INTENSITY:
+  - Emotional, certainty, urgency scores as grouped bar chart or radar
+  - Score display: 0-1 raw → 10-90 display scale
+  - Toggle between bars and radar views
+  - No-evidence outlets show: "There is not enough article text..."
+
+HEADLINE DIFF (FrameShift Replay):
+  - Two dropdown selectors for any pair of snapshots
+  - wordDiff algorithm renders inline colored spans
+  - Green = added, red strikethrough = removed, yellow = reworded
+
+STAKEHOLDER TIMELINE (Narrative Evolution):
+  - Horizontal rail with colored dots positioned by first_appeared_at
+  - Olympic clustering for simultaneous appearances
+  - Mouse-following tooltip for individual or group details
+
+
+================================================================================
+UPDATED SIGNAL SAFETY NOTES
+================================================================================
+The current implementation computes deterministic evidence before optional
+Groq enrichment. Source attribution counts only entities or role terms found
+near attribution verbs; arbitrary named entities are not treated as voices.
+Agency examples are selected from scored sentences and always use the existing
+{text,type} contract. Language intensity uses normalized word forms, headline
+weighting, phrase boundaries, and a separate hedge penalty for certainty.
+
+Missing evidence is stored as NULL with analysis_status and evidence_count,
+not as a guessed 0.5. The dashboard keeps raw scores in 0-1 and continues to
+apply its display transforms: agency 15-100 and language intensity 10-90.
+Batch LLM responses must include article_id, and malformed or reordered
+responses fall back to deterministic analysis rather than attaching a signal
+to the wrong article. Coverage rows remain per article_id because that is the
+database contract. All articles that pass the keyword filter are retained in
+the dashboard — a missing LLM response is not grounds for removal.
+
+The database migration (20260830010000_add_signal_evidence_metadata.sql) adds:
+  - articles.extraction_quality (full/partial/headline_only/failed)
+  - evidence_count, analysis_status, analysis_method to all signal tables
+  - Nullable score columns for unavailable evidence states
+
+
+================================================================================
+END OF ALGORITHMS DOCUMENT
+================================================================================

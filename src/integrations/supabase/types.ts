@@ -16,6 +16,7 @@ export type Database = {
     Tables: {
       articles: {
         Row: {
+          extraction_quality: string
           event_id: string
           full_text: string
           headline: string
@@ -25,6 +26,7 @@ export type Database = {
           url: string
         }
         Insert: {
+          extraction_quality?: string
           event_id: string
           full_text: string
           headline: string
@@ -34,6 +36,7 @@ export type Database = {
           url: string
         }
         Update: {
+          extraction_quality?: string
           event_id?: string
           full_text?: string
           headline?: string
@@ -55,6 +58,35 @@ export type Database = {
             columns: ["outlet_id"]
             isOneToOne: false
             referencedRelation: "outlets"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      saved_analyses: {
+        Row: {
+          created_at: string
+          event_id: string
+          id: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          event_id: string
+          id?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          event_id?: string
+          id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "saved_analyses_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
             referencedColumns: ["id"]
           },
         ]
@@ -174,18 +206,27 @@ export type Database = {
       }
       signals_agency_framing: {
         Row: {
-          agency_score: number
+          agency_score: number | null
+          analysis_method: string
+          analysis_status: string
           article_id: string
+          evidence_count: number
           example_phrases: Json
         }
         Insert: {
-          agency_score: number
+          agency_score?: number | null
+          analysis_method?: string
+          analysis_status?: string
           article_id: string
+          evidence_count?: number
           example_phrases?: Json
         }
         Update: {
-          agency_score?: number
+          agency_score?: number | null
+          analysis_method?: string
+          analysis_status?: string
           article_id?: string
+          evidence_count?: number
           example_phrases?: Json
         }
         Relationships: [
@@ -201,21 +242,30 @@ export type Database = {
       signals_language_intensity: {
         Row: {
           article_id: string
-          certainty_score: number
-          emotional_score: number
-          urgency_score: number
+          analysis_method: string
+          analysis_status: string
+          certainty_score: number | null
+          emotional_score: number | null
+          evidence_count: number
+          urgency_score: number | null
         }
         Insert: {
           article_id: string
-          certainty_score: number
-          emotional_score: number
-          urgency_score: number
+          analysis_method?: string
+          analysis_status?: string
+          certainty_score?: number | null
+          emotional_score?: number | null
+          evidence_count?: number
+          urgency_score?: number | null
         }
         Update: {
           article_id?: string
-          certainty_score?: number
-          emotional_score?: number
-          urgency_score?: number
+          analysis_method?: string
+          analysis_status?: string
+          certainty_score?: number | null
+          emotional_score?: number | null
+          evidence_count?: number
+          urgency_score?: number | null
         }
         Relationships: [
           {
@@ -229,19 +279,28 @@ export type Database = {
       }
       signals_source_attribution: {
         Row: {
+          analysis_method: string
+          analysis_status: string
+          evidence_count: number
           article_id: string
-          independent_ratio: number
-          official_ratio: number
+          independent_ratio: number | null
+          official_ratio: number | null
         }
         Insert: {
+          analysis_method?: string
+          analysis_status?: string
+          evidence_count?: number
           article_id: string
-          independent_ratio: number
-          official_ratio: number
+          independent_ratio?: number | null
+          official_ratio?: number | null
         }
         Update: {
+          analysis_method?: string
+          analysis_status?: string
+          evidence_count?: number
           article_id?: string
-          independent_ratio?: number
-          official_ratio?: number
+          independent_ratio?: number | null
+          official_ratio?: number | null
         }
         Relationships: [
           {

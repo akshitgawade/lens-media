@@ -1,8 +1,24 @@
 import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { supabase } from "@/integrations/supabase/client";
 import { Loader2 } from "lucide-react";
+
+function useSlide(dir: "left" | "right" = "left") {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) { el.style.opacity = "1"; el.style.transform = "none"; return; }
+    el.style.opacity = "0";
+    el.style.transform = dir === "left" ? "translateX(-28px)" : "translateX(28px)";
+    el.style.transition = "transform 700ms cubic-bezier(0.22,1,0.36,1), opacity 700ms ease-out";
+    const obs = new IntersectionObserver(([e]) => { if (e.isIntersecting) { el.style.opacity = "1"; el.style.transform = "translateX(0)"; obs.disconnect(); } }, { threshold: 0.15 });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [dir]);
+  return ref;
+}
 
 const searchSchema = z.object({
   redirect: z.string().optional(),
@@ -22,6 +38,7 @@ export const Route = createFileRoute("/auth")({
 });
 
 function AuthPage() {
+  const [checking, setChecking] = useState(true);
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -33,7 +50,8 @@ function AuthPage() {
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
-      if (data.session) navigate({ to: search.redirect ?? "/account" });
+      if (data.session) navigate({ to: search.redirect ?? "/account", replace: true });
+      else setChecking(false);
     });
   }, [navigate, search.redirect]);
 
@@ -64,9 +82,12 @@ function AuthPage() {
     }
   }
 
+  const leftRef = useSlide("left");
+  const rightRef = useSlide("right");
+  if (checking) return <div className="mx-auto max-w-6xl px-6 py-20"><div className="h-64 animate-pulse rounded-md bg-secondary/50" /></div>;
   return (
-    <div className="mx-auto grid max-w-6xl gap-12 px-6 py-20 lg:grid-cols-2">
-      <div>
+    <div className="mx-auto grid max-w-6xl gap-12 px-6 py-20 lg:grid-cols-2 overflow-hidden">
+      <div ref={leftRef}>
         <p className="eyebrow">Access</p>
         <h1 className="headline mt-3 text-5xl">
           {mode === "signin" ? "Sign in." : "Create your account."}
@@ -77,7 +98,8 @@ function AuthPage() {
         </p>
       </div>
 
-      <form onSubmit={submit} className="paper-card space-y-4 p-8">
+      <div ref={rightRef} className="relative">
+        <form onSubmit={submit} className="paper-card relative space-y-4 p-8 will-change-transform transition-[transform,box-shadow] duration-[1600ms] ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-1 hover:shadow-[0_20px_40px_-16px_oklch(0_0_0/0.12)]">
         <div className="flex gap-2 border-b border-rule pb-4">
           {(["signin", "signup"] as const).map((m) => (
             <button
@@ -121,7 +143,8 @@ function AuthPage() {
           {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           {mode === "signin" ? "Sign in" : "Create account"}
         </button>
-      </form>
+        </form>
+      </div>
     </div>
   );
 }
